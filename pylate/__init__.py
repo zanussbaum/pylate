@@ -9,4 +9,5 @@ __all__ = [
     "retrieve",
     "scores",
     "utils",
+    "trainer",
 ]
