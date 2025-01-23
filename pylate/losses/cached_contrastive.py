@@ -15,7 +15,7 @@ from torch.utils.checkpoint import get_device_states, set_device_states
 from ..models import ColBERT
 from ..scores import colbert_scores
 from .contrastive import extract_skiplist_mask
-from ..utils.distributed import gather_with_grad, print_rank_zero
+from ..utils.distributed import gather_with_grad, print_in_order
 
 
 class RandContext:
@@ -222,7 +222,7 @@ class CachedContrastive(nn.Module):
             # TODO: i'm not sure this works when other embeddings are included
             embeddings_other = [gather_with_grad(e) for e in embeddings_other]
             # I don't totally get what masks is doing
-            masks = [gather_with_grad(m) for m in masks[1:]]
+            masks = [gather_with_grad(m) for m in masks]
 
         batch_size = len(embeddings_anchor)
         labels = torch.tensor(

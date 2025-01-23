@@ -92,7 +92,7 @@ def main():
     # Define training parameters
     num_train_epochs = 1
     lr = 2.0e-4
-    batch_size = 128
+    batch_size = 16384
     mini_batch_size = 8
     model_name = "answerdotai/ModernBERT-base"
     model_shortname = model_name.split("/")[-1]
@@ -105,12 +105,12 @@ def main():
     model = models.ColBERT(model_name_or_path=model_name, document_length=180)
 
     # Setup evaluation and loss
+    # TODO: do we need to prefix each query with [Q]?
     dev_evaluator = evaluation.NanoBEIREvaluator()
     train_loss = losses.CachedContrastive(
         model=model,
         mini_batch_size=mini_batch_size,
         gather_across_ranks=True,
-        show_progress_bar=True,
     )
 
     # Configure training arguments
@@ -124,7 +124,7 @@ def main():
         eval_strategy="steps",
         eval_steps=5000,
         save_steps=5000,
-        logging_steps=50,
+        logging_steps=1,
         fp16=False,
         bf16=True,
         run_name=run_name,
