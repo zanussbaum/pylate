@@ -67,9 +67,15 @@ def load_train_datasets():
             print(f"Loading {split} dataset...")
             # data_files = {split: f"data/{split}-*"}
             dataset = load_dataset(
-                "nomic-ai/nomic-embed-unsupervised-data", split=split
+                "nomic-ai/nomic-embed-unsupervised-data", split=split, num_proc=64
             )
-            train_dataset[split] = dataset.remove_columns([col for col in dataset.column_names if col not in ["query", "document"]])
+            train_dataset[split] = dataset.remove_columns(
+                [
+                    col
+                    for col in dataset.column_names
+                    if col not in ["query", "document"]
+                ]
+            )
             print(f"Loaded {split} dataset with {len(dataset)} examples.")
         train_dataset.save_to_disk(cache_dir)
         return train_dataset
@@ -85,8 +91,9 @@ def main():
 
     # Define training parameters
     num_train_epochs = 1
-    lr = 3e-6
-    batch_size = 8 
+    lr = 2.0e-4
+    batch_size = 128
+    mini_batch_size = 8
     model_name = "answerdotai/ModernBERT-base"
     model_shortname = model_name.split("/")[-1]
 
@@ -99,7 +106,12 @@ def main():
 
     # Setup evaluation and loss
     dev_evaluator = evaluation.NanoBEIREvaluator()
-    train_loss = losses.Contrastive(model=model)
+    train_loss = losses.CachedContrastive(
+        model=model,
+        mini_batch_size=mini_batch_size,
+        gather_across_ranks=True,
+        show_progress_bar=True,
+    )
 
     # Configure training arguments
     args = SentenceTransformerTrainingArguments(
@@ -107,6 +119,7 @@ def main():
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
+        # idk if we need this still?
         multi_dataset_batch_sampler=MultiDatasetBatchSamplers.PROPORTIONAL,
         eval_strategy="steps",
         eval_steps=5000,
@@ -117,8 +130,9 @@ def main():
         run_name=run_name,
         learning_rate=lr,
         log_level="debug",
+        logging_strategy="steps",
         seed=42,
-        split_batches=True
+        split_batches=True,
     )
 
     # Initialize and run trainer
