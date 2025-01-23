@@ -9,11 +9,13 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from torch import Tensor, nn
+import torch.distributed as dist
 from torch.utils.checkpoint import get_device_states, set_device_states
 
 from ..models import ColBERT
 from ..scores import colbert_scores
 from .contrastive import extract_skiplist_mask
+from ..utils.distributed import gather_with_grad, print_rank_zero
 
 
 class RandContext:
@@ -99,6 +101,7 @@ class CachedContrastive(nn.Module):
         mini_batch_size: int = 32,
         size_average: bool = True,
         show_progress_bar: bool = False,
+        gather_across_ranks: bool = False,
     ) -> None:
         super(CachedContrastive, self).__init__()
         self.model = model
@@ -112,6 +115,7 @@ class CachedContrastive(nn.Module):
         # Will hold random states for each chunk, so we can re-run the embedding pass with grads
         self.random_states: list[list[RandContext]] | None = None
         self.show_progress_bar = show_progress_bar
+        self.gather_across_ranks = gather_across_ranks
 
     def embed_minibatch(
         self,
@@ -182,7 +186,12 @@ class CachedContrastive(nn.Module):
     def calculate_loss_and_cache_gradients(self, reps, masks) -> Tensor:
         """Calculate the cross-entropy loss and cache the gradients wrt. the embeddings."""
         # we want partial grads on all the chunked embeddings
-        loss = self.calculate_loss(reps, masks, with_backward=True)
+        loss = self.calculate_loss(
+            reps,
+            masks,
+            with_backward=True,
+            gather_across_ranks=self.gather_across_ranks,
+        )
         loss = loss.detach().requires_grad_()
 
         self.cache = [
@@ -191,7 +200,13 @@ class CachedContrastive(nn.Module):
 
         return loss
 
-    def calculate_loss(self, reps, masks, with_backward: bool = False) -> Tensor:
+    def calculate_loss(
+        self,
+        reps,
+        masks,
+        with_backward: bool = False,
+        gather_across_ranks: bool = False,
+    ) -> Tensor:
         """Calculate the cross-entropy loss. No need to cache the gradients."""
         # Each sub-list in reps is a list of mini-batch chunk embeddings
         # We first cat them chunk-wise for anchor, positives, negatives
@@ -203,10 +218,19 @@ class CachedContrastive(nn.Module):
             torch.cat([chunk_embed for chunk_embed in r]) for r in reps[1:]
         ]  # [(nneg * bsz, hdim)]
 
+        if gather_across_ranks:
+            # TODO: i'm not sure this works when other embeddings are included
+            embeddings_other = [gather_with_grad(e) for e in embeddings_other]
+            # I don't totally get what masks is doing
+            masks = [gather_with_grad(m) for m in masks[1:]]
+
         batch_size = len(embeddings_anchor)
         labels = torch.tensor(
             range(batch_size), dtype=torch.long, device=reps[0][0].device
         )  # (bsz, (1 + nneg) * bsz)  Example a[i] should match with b[i]
+        if gather_across_ranks:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            labels = labels + rank * batch_size
         losses: list[torch.Tensor] = []
         for b in tqdm.trange(
             0,
@@ -224,10 +248,14 @@ class CachedContrastive(nn.Module):
                 dim=1,
             )
             # We don't want to average the loss across the mini-batch as mini-batch sizes can vary, which would create an issue similar to this one: https://huggingface.co/blog/gradient_accumulation#where-does-it-stem-from
-            loss_mbatch = F.cross_entropy(
-                input=scores,
-                target=labels[b:e],
-                reduction="sum",
+            # (zach): scale by world size
+            loss_mbatch = (
+                F.cross_entropy(
+                    input=scores,
+                    target=labels[b:e],
+                    # reduction="sum",
+                )
+                * dist.get_world_size()
             )
 
             if with_backward:
